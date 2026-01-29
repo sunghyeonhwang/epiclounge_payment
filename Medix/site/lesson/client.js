@@ -1,4 +1,44 @@
 // ============================================================
+// Authentication Check & Initialization Guard
+// - 페이지 로드 시 로그인 상태 확인
+// - 미인증 시 auth.html로 리다이렉트
+// - 인증 완료될 때까지 모든 초기화 차단
+// ============================================================
+window._authChecked = false;
+window._authSuccess = false;
+
+(function () {
+  // 페이지 즉시 숨김 (깜빡임 방지)
+  document.body.style.visibility = 'hidden';
+  
+  // 인증 확인
+  fetch('/api/auth/check.php')
+    .then(function (res) { return res.json(); })
+    .then(function (data) {
+      if (!data.success || !data.authenticated) {
+        // 미인증 - 로그인 페이지로 리다이렉트
+        console.log('[Auth] Not authenticated, redirecting to auth.html');
+        window.location.href = 'auth.html';
+      } else {
+        // 인증 성공 - 사용자 정보 저장
+        window._currentUser = data.user;
+        window._authSuccess = true;
+        window._authChecked = true;
+        console.log('[Auth] Logged in as:', data.user.display_name);
+        // 페이지 표시
+        document.body.style.visibility = 'visible';
+        // 커스텀 이벤트 발생 (다른 모듈이 대기 중)
+        document.dispatchEvent(new Event('authReady'));
+      }
+    })
+    .catch(function (err) {
+      console.error('[Auth] Failed to check authentication:', err);
+      // 에러 시 로그인 페이지로 리다이렉트
+      window.location.href = 'auth.html';
+    });
+})();
+
+// ============================================================
 // Dark Mode / Light Mode Theme Manager
 // - Syncs Tailwind CSS 'dark' class AND [data-theme] attribute
 // - Detects system color-scheme preference (prefers-color-scheme)
@@ -357,6 +397,7 @@
   var isPlaying = false;
   var isSeeking = false;
   var isMuted = false;
+  var playerInitId = 0; // Counter to track player instances
 
   // Resume watching state: track current lecture info for periodic saving
   var currentLectureId = null;
@@ -378,9 +419,9 @@
   // Demo Vimeo video ID (public sample video for development)
   var DEMO_VIMEO_ID = '76979871';
 
-  // Load course data from JSON (with cache busting)
+  // Load course data from server API (로그인된 사용자의 진행률 포함)
   function loadCourseData() {
-    return fetch('course-data.json?v=' + Date.now())
+    return fetch('/api/courses/get.php?id=1')
       .then(function (res) {
         if (!res.ok) throw new Error('Failed to load course data');
         return res.json();
@@ -402,11 +443,11 @@
             }
           }
         }
-        console.log('[VimeoPlayer] Course data loaded:', data.courseInfo.title);
+        console.log('[VimeoPlayer] Course data loaded from server:', data.courseInfo.title);
         return data;
       })
       .catch(function (err) {
-        console.warn('[VimeoPlayer] Failed to load course data, using defaults:', err);
+        console.error('[VimeoPlayer] Failed to load course data:', err);
         return null;
       });
   }
@@ -460,6 +501,10 @@
       return;
     }
 
+    // Increment counter to invalidate previous player's events
+    playerInitId++;
+    var myInitId = playerInitId;
+
     // Handle both old format (string) and new format (object)
     var vimeoId = typeof vimeoData === 'object' ? vimeoData.id : vimeoData;
     var vimeoHash = typeof vimeoData === 'object' ? vimeoData.hash : null;
@@ -470,20 +515,21 @@
     if (vimeoHash) {
       params.push('h=' + vimeoHash);
     }
-    params.push('title=0', 'byline=0', 'portrait=0', 'controls=0', 'transparent=0');
+    // Vimeo 플레이어 설정: 타이틀/작성자/프로필 숨김, 컨트롤 숨김, 루프 끔
+    params.push('title=0', 'byline=0', 'portrait=0', 'controls=0', 'loop=0', 'background=0', 'transparent=1');
+    
+    // Simply change iframe src
     iframe.src = videoUrl + '?' + params.join('&');
-
     player = new Vimeo.Player(iframe);
 
     // Get initial duration when player is ready
     player.ready().then(function () {
-      // Placeholder is already hidden by default in HTML
+      if (playerInitId !== myInitId) return; // Stale player
       return player.getDuration();
     }).then(function (dur) {
+      if (playerInitId !== myInitId) return; // Stale player
       videoDuration = dur;
       updateTimeDisplay(0, dur);
-
-      // Apply current speed
       return player.setPlaybackRate(currentSpeed);
     }).catch(function (err) {
       console.error('[VimeoPlayer] Init error:', err);
@@ -491,15 +537,28 @@
 
     // --- Event Listeners ---
 
+    // Track if video end was already handled for this player
+    var endedHandled = false;
+    
     // Playback progress (timeupdate)
     player.on('timeupdate', function (data) {
-      if (isSeeking) return;
+      // Skip if seeking or if this is a stale player
+      if (isSeeking || playerInitId !== myInitId) return;
+      
       videoDuration = data.duration;
       var pct = data.duration > 0 ? (data.seconds / data.duration) * 100 : 0;
 
       updateTimeDisplay(data.seconds, data.duration);
       updateSeekBar(pct);
       updateLectureProgress(pct);
+      
+      // Fallback: 영상이 마지막 0.5초 이내면 완료 처리 (ended 이벤트가 안 올 경우 대비)
+      var remainingTime = data.duration - data.seconds;
+      if (remainingTime <= 0.5 && remainingTime >= 0 && !endedHandled && data.duration > 0) {
+        console.log('[VimeoPlayer] 마지막 0.5초, 완료 처리 (fallback), 남은시간:', remainingTime.toFixed(2));
+        endedHandled = true;
+        onVideoEnded(true); // true = pause 함
+      }
 
       // 이어서 보기: Save progress periodically (every SAVE_INTERVAL seconds of change)
       if (currentLectureId && Math.abs(data.seconds - lastSavedTime) >= SAVE_INTERVAL) {
@@ -534,7 +593,19 @@
     });
 
     // Video ended
-    player.on('ended', onVideoEnded);
+    player.on('ended', function () {
+      console.log('[VimeoPlayer] ended 이벤트 발생! playerInitId:', playerInitId, 'myInitId:', myInitId, 'endedHandled:', endedHandled);
+      if (playerInitId !== myInitId) {
+        console.log('[VimeoPlayer] ended 무시됨 (stale player)');
+        return;
+      }
+      if (endedHandled) {
+        console.log('[VimeoPlayer] ended 무시됨 (이미 처리됨)');
+        return;
+      }
+      endedHandled = true;
+      onVideoEnded(true); // true = pause 함
+    });
 
     // Playback rate change
     player.on('playbackratechange', function (data) {
@@ -544,11 +615,27 @@
   }
 
   // --- Video End Handler ---
-  function onVideoEnded() {
-    isPlaying = false;
+  var lastCompletedLectureId = null; // Prevent duplicate completion
+  
+  function onVideoEnded(shouldPause) {
+    // shouldPause 기본값 true
+    if (shouldPause === undefined) shouldPause = true;
+    
+    console.log('[VideoEnded] 강의 종료 감지, currentLectureId:', currentLectureId, 'lastCompleted:', lastCompletedLectureId, 'shouldPause:', shouldPause);
+    
+    // Prevent duplicate completion for same lecture
+    if (currentLectureId && currentLectureId === lastCompletedLectureId) {
+      console.log('[VideoEnded] 이미 완료 처리된 강의, 무시');
+      return;
+    }
+    lastCompletedLectureId = currentLectureId;
+    
+    isPlaying = !shouldPause;
     updatePlayButton();
-    updateSeekBar(100);
-    updateLectureProgress(100);
+    if (shouldPause) {
+      updateSeekBar(100);
+      updateLectureProgress(100);
+    }
 
     // 이어서 보기: Clear saved progress since the lecture is complete
     if (window._resumeWatching) {
@@ -557,7 +644,18 @@
 
     // Mark current lecture as completed in sidebar
     var activeLecture = curriculumNav ? curriculumNav.querySelector('[data-status="playing"]') : null;
+    
+    // Fallback: use currentLectureId if no playing lecture found
+    if (!activeLecture && currentLectureId && curriculumNav) {
+      activeLecture = curriculumNav.querySelector('[data-lecture-id="' + currentLectureId + '"]');
+    }
+    
+    console.log('[VideoEnded] activeLecture:', activeLecture);
+    
     if (activeLecture) {
+      var completedLectureId = activeLecture.getAttribute('data-lecture-id');
+      console.log('[VideoEnded] 완료 처리 중:', completedLectureId);
+      
       activeLecture.setAttribute('data-status', 'completed');
       activeLecture.removeAttribute('aria-current');
 
@@ -588,14 +686,18 @@
 
       // 학습 진도: Update progress bars and sync to DB
       if (window._progressTracker) {
-        window._progressTracker.onLectureCompleted(activeLecture.getAttribute('data-lecture-id'));
+        window._progressTracker.onLectureCompleted(completedLectureId);
       }
     }
 
-    // Auto-advance to next lecture with countdown overlay
-    var nextLecture = findNextLecture();
-    if (nextLecture) {
-      startAutoNextCountdown(nextLecture);
+    // 강의 완료 후 멈춤 (자동 다음 강의 없음)
+    console.log('[VideoEnded] 강의 완료, shouldPause:', shouldPause);
+    
+    // shouldPause가 true일 때만 플레이어 멈춤
+    if (shouldPause && player) {
+      player.pause().catch(function (err) {
+        console.warn('[VimeoPlayer] Pause error:', err);
+      });
     }
   }
 
@@ -838,38 +940,55 @@
     if (lectureTitleEl) {
       lectureTitleEl.textContent = title;
     }
+    
+    // Update lecture meta info (섹션 정보 및 강의 순서)
+    var lectureMetaEl = document.getElementById('currentLectureMeta');
+    if (lectureMetaEl && courseData && courseData.sections) {
+      var sectionTitle = '';
+      var lectureIndex = 0;
+      var totalLectures = 0;
+      
+      // Find which section this lecture belongs to
+      for (var i = 0; i < courseData.sections.length; i++) {
+        var section = courseData.sections[i];
+        totalLectures += section.lectures.length;
+        
+        for (var j = 0; j < section.lectures.length; j++) {
+          if (String(section.lectures[j].id) === String(lectureId)) {
+            sectionTitle = section.title;
+            // Calculate lecture index (1-based)
+            for (var k = 0; k < i; k++) {
+              lectureIndex += courseData.sections[k].lectures.length;
+            }
+            lectureIndex += j + 1;
+            break;
+          }
+        }
+        if (sectionTitle) break;
+      }
+      
+      if (sectionTitle) {
+        lectureMetaEl.textContent = sectionTitle + ' · ' + lectureIndex + '/' + totalLectures + '강';
+      }
+    }
 
-    // Reset progress
+    // Reset UI to loading state
     updateSeekBar(0);
     updateLectureProgress(0);
-    updateTimeDisplay(0, 0);
+    
+    // Reset play button to play state
+    isPlaying = false;
+    updatePlayButton();
+    
+    // Clear duration
+    videoDuration = 0;
 
     // Scroll lecture into view in sidebar
     lectureEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-    // Load the lecture's video (each lecture has its own Vimeo ID)
+    // Load the lecture's video
     var vimeoData = getVimeoDataForLecture(lectureId);
-    var vimeoId = vimeoData.id;
-    if (player && vimeoId) {
-      // Check if we need to load a different video
-      player.getVideoId().then(function (currentVimeoId) {
-        if (String(currentVimeoId) !== String(vimeoId)) {
-          // Different video - reload player with new video
-          initPlayer(vimeoData);
-        } else {
-          // Same video - just restart from beginning
-          player.setCurrentTime(0).then(function () {
-            return player.play();
-          }).catch(function (err) {
-            console.error('[VimeoPlayer] Lecture switch error:', err);
-          });
-        }
-      }).catch(function () {
-        // If getVideoId fails, just reload
-        initPlayer(vimeoData);
-      });
-    } else if (!player && vimeoId) {
-      // Player not initialized yet
+    if (vimeoData && vimeoData.id) {
       initPlayer(vimeoData);
     }
   }
@@ -877,11 +996,35 @@
   // --- Play/Pause Toggle ---
   function togglePlayPause() {
     if (!player) return;
-    if (isPlaying) {
-      player.pause();
-    } else {
-      player.play();
-    }
+    
+    // Check actual player state to avoid sync issues
+    player.getPaused().then(function (paused) {
+      if (paused) {
+        // Player is paused, so play it
+        player.play().then(function () {
+          isPlaying = true;
+          updatePlayButton();
+        }).catch(function (err) {
+          console.error('[VimeoPlayer] Play error:', err);
+        });
+      } else {
+        // Player is playing, so pause it
+        player.pause().then(function () {
+          isPlaying = false;
+          updatePlayButton();
+        }).catch(function (err) {
+          console.error('[VimeoPlayer] Pause error:', err);
+        });
+      }
+    }).catch(function (err) {
+      console.error('[VimeoPlayer] getPaused error:', err);
+      // Fallback to using isPlaying variable
+      if (isPlaying) {
+        player.pause().catch(function () {});
+      } else {
+        player.play().catch(function () {});
+      }
+    });
   }
 
   function updatePlayButton() {
@@ -977,10 +1120,17 @@
     var rect = seekBar.getBoundingClientRect();
     var x = e.clientX - rect.left;
     var pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
-    var targetTime = (pct / 100) * videoDuration;
-
+    
     updateSeekBar(pct);
-    player.setCurrentTime(targetTime).catch(function (err) {
+    
+    // 항상 Vimeo에서 현재 비디오의 duration을 가져와서 사용
+    player.getDuration().then(function (dur) {
+      videoDuration = dur;
+      var targetTime = (pct / 100) * dur;
+      // 범위 제한: 0 ~ (duration - 0.5)
+      targetTime = Math.max(0, Math.min(targetTime, dur - 0.5));
+      return player.setCurrentTime(targetTime);
+    }).catch(function (err) {
       console.warn('[VimeoPlayer] Seek error:', err);
     });
   }
@@ -1242,6 +1392,7 @@
         var li = document.createElement('li');
         li.setAttribute('data-lecture-id', lecture.id);
         li.setAttribute('data-status', lecture.status);
+        li.setAttribute('data-duration', lecture.durationSeconds || 0);
 
         var baseClasses = 'flex items-center gap-2 px-4 md:px-6 pl-6 md:pl-8 py-2 cursor-pointer border-l-[3px] transition-colors duration-150';
         
@@ -1311,28 +1462,36 @@
     console.log('[VimeoPlayer] Curriculum rendered from course data');
   }
 
-  // --- Initialize: Load course data on page load ---
-  loadCourseData().then(function () {
-    console.log('[VimeoPlayer] Ready - Lecture data loaded');
-    renderCurriculum();
-    
-    // Refresh all progress UI after curriculum is rendered
-    if (window._progressTracker) {
-      window._progressTracker.refresh();
-    }
-    
-    // Auto-load the first lecture with 'playing' status, or the first lecture overall
-    var firstPlayingLecture = curriculumNav ? curriculumNav.querySelector('[data-status="playing"]') : null;
-    if (!firstPlayingLecture) {
-      firstPlayingLecture = curriculumNav ? curriculumNav.querySelector('[data-lecture-id]') : null;
-    }
-    
-    if (firstPlayingLecture) {
-      var lectureId = firstPlayingLecture.getAttribute('data-lecture-id');
-      var vimeoData = getVimeoDataForLecture(lectureId);
-      initPlayer(vimeoData);
-    }
-  });
+  // --- Initialize: Load course data AFTER authentication ---
+  function initializeApp() {
+    loadCourseData().then(function () {
+      console.log('[VimeoPlayer] Ready - Lecture data loaded');
+      renderCurriculum();
+      
+      // Refresh all progress UI after curriculum is rendered
+      if (window._progressTracker) {
+        window._progressTracker.refresh();
+      }
+      
+      // Auto-load the first lecture with 'playing' status, or the first lecture overall
+      var firstPlayingLecture = curriculumNav ? curriculumNav.querySelector('[data-status="playing"]') : null;
+      if (!firstPlayingLecture) {
+        firstPlayingLecture = curriculumNav ? curriculumNav.querySelector('[data-lecture-id]') : null;
+      }
+      
+      if (firstPlayingLecture) {
+        // Use selectLecture to properly update all UI elements
+        selectLecture(firstPlayingLecture);
+      }
+    });
+  }
+  
+  // 인증 완료 후에만 초기화
+  if (window._authChecked && window._authSuccess) {
+    initializeApp();
+  } else {
+    document.addEventListener('authReady', initializeApp);
+  }
 })();
 
 // ============================================================
@@ -1381,12 +1540,23 @@
 
   // --- Check if backend API is available ---
   function checkDbAvailability() {
-    return fetch('/api/health', { method: 'GET' })
+    // Use auth check endpoint since we know it works with DB
+    return fetch('/api/auth/check.php', { method: 'GET' })
       .then(function (res) {
-        dbAvailable = res.ok;
+        if (!res.ok) {
+          dbAvailable = false;
+          return false;
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        // If we got a valid response, DB is available
+        dbAvailable = data && data.success !== undefined;
+        console.log('[ProgressTracker] DB 가용성 체크:', dbAvailable);
         return dbAvailable;
       })
-      .catch(function () {
+      .catch(function (err) {
+        console.warn('[ProgressTracker] DB 가용성 체크 실패:', err);
         dbAvailable = false;
         return false;
       });
@@ -1505,12 +1675,28 @@
   // Save lecture completion to DB
   function saveLectureCompleted(lectureId) {
     if (!dbAvailable) return;
-    apiRequest('PUT', '/api/progress/' + DEMO_USER_ID + '/lectures/' + lectureId, {
-      last_position: 0,
-      completed: true
-    }).catch(function (err) {
-      console.warn('[ProgressTracker] Failed to save completion to DB:', err.message);
-    });
+    
+    // Use the correct API endpoint
+    fetch('/api/progress/complete.php', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        lecture_id: lectureId
+      })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data.success) {
+          console.log('[ProgressTracker] Lecture completed, saved to DB:', lectureId);
+        } else {
+          console.warn('[ProgressTracker] Failed to save completion:', data.error);
+        }
+      })
+      .catch(function (err) {
+        console.warn('[ProgressTracker] Failed to save completion to DB:', err);
+      });
   }
 
   // Save current playback position to DB (debounced)
@@ -1521,28 +1707,44 @@
     }
     pendingSave = setTimeout(function () {
       pendingSave = null;
-      apiRequest('PUT', '/api/progress/' + DEMO_USER_ID + '/lectures/' + lectureId, {
-        last_position: Math.floor(position),
-        completed: false
-      }).catch(function (err) {
-        console.warn('[ProgressTracker] Failed to save position to DB:', err.message);
-      });
+      
+      fetch('/api/progress/save.php', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          lecture_id: lectureId,
+          last_position: Math.floor(position)
+        })
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (!data.success) {
+            console.warn('[ProgressTracker] Failed to save position:', data.error);
+          }
+        })
+        .catch(function (err) {
+          console.warn('[ProgressTracker] Failed to save position to DB:', err);
+        });
     }, DB_SAVE_DEBOUNCE);
   }
 
   // Load progress from DB and apply to DOM
   function loadProgressFromDb() {
     if (!dbAvailable) return Promise.resolve(null);
-    return apiRequest('GET', '/api/progress/' + DEMO_USER_ID + '/courses/' + DEMO_COURSE_ID)
+    
+    return fetch('/api/progress/get.php?course_id=1')
+      .then(function (res) { return res.json(); })
       .then(function (data) {
-        if (!data || !data.lecture_progress || data.lecture_progress.length === 0) {
+        if (!data.success || !data.progress || data.progress.length === 0) {
           return null;
         }
-        applyProgressToDOM(data.lecture_progress);
+        applyProgressToDOM(data.progress);
         return data;
       })
       .catch(function (err) {
-        console.warn('[ProgressTracker] Failed to load progress from DB:', err.message);
+        console.warn('[ProgressTracker] Failed to load progress from DB:', err);
         return null;
       });
   }
@@ -1638,4 +1840,119 @@
     refresh: refresh,
     loadFromDb: loadProgressFromDb
   };
+})();
+
+// ============================================================
+// Logout Handler
+// - 로그아웃 버튼 클릭 시 API 호출 및 auth.html로 리다이렉트
+// ============================================================
+(function () {
+  var logoutBtn = document.getElementById('logoutBtn');
+  
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', function () {
+      if (!confirm('로그아웃하시겠습니까?')) {
+        return;
+      }
+      
+      fetch('/api/auth/logout.php', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data.success) {
+            console.log('[Auth] Logged out successfully');
+            window.location.href = 'auth.html';
+          } else {
+            alert('로그아웃에 실패했습니다: ' + (data.error || '알 수 없는 오류'));
+          }
+        })
+        .catch(function (err) {
+          console.error('[Auth] Logout error:', err);
+          alert('로그아웃 중 오류가 발생했습니다.');
+        });
+    });
+  }
+})();
+
+// ============================================================
+// Reset Progress Handler
+// - 진행률 초기화 버튼 클릭 시 모든 진행률을 리셋
+// ============================================================
+(function () {
+  var resetBtn = document.getElementById('resetProgressBtn');
+  
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      if (!confirm('모든 강의 진행률을 초기화하시겠습니까?\n이 작업은 되돌릴 수 없습니다.')) {
+        return;
+      }
+      
+      // 1. Reset all lectures in DOM to pending state
+      var curriculumNav = document.getElementById('curriculumNav');
+      if (curriculumNav) {
+        var allLectures = curriculumNav.querySelectorAll('[data-lecture-id]');
+        allLectures.forEach(function (lecture) {
+          lecture.setAttribute('data-status', 'pending');
+          lecture.removeAttribute('aria-current');
+          
+          // Reset styling to default
+          lecture.className = 'flex items-center gap-2 px-4 md:px-6 pl-6 md:pl-8 py-2 cursor-pointer hover:bg-gray-50 dark:hover:bg-[#28282e] border-l-[3px] border-transparent transition-colors duration-150';
+          
+          // Reset icon to empty circle
+          var iconSpan = lecture.querySelector('.flex-shrink-0');
+          if (iconSpan) {
+            iconSpan.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.5" opacity="0.3"/></svg>';
+            iconSpan.setAttribute('aria-label', '미수강');
+            iconSpan.className = 'flex-shrink-0 flex items-center justify-center w-5 h-5 text-gray-400 dark:text-gray-500';
+          }
+          
+          // Reset text styling
+          var titleSpan = lecture.querySelector('.flex-1');
+          if (titleSpan) {
+            titleSpan.className = 'flex-1 text-sm text-gray-900 dark:text-gray-100 min-w-0 whitespace-nowrap overflow-hidden text-ellipsis';
+          }
+          
+          // Reset time styling
+          var timeSpan = lecture.querySelector('.flex-shrink-0:last-child');
+          if (timeSpan && timeSpan.classList.contains('font-mono')) {
+            timeSpan.className = 'flex-shrink-0 text-xs text-gray-400 dark:text-gray-500 font-mono';
+          }
+        });
+      }
+      
+      // 2. Reset progress bars
+      if (window._progressTracker) {
+        window._progressTracker.refresh();
+      }
+      
+      // 3. Call API to reset progress in DB
+      fetch('/api/progress/reset.php', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          console.log('[Progress] Reset API response:', data);
+          if (data.success) {
+            console.log('[Progress] Reset successfully, deleted:', data.deleted_count);
+            alert('진행률이 초기화되었습니다.');
+            // 페이지 새로고침으로 깨끗한 상태 보장
+            window.location.reload();
+          } else {
+            console.warn('[Progress] Reset failed:', data.error);
+            alert('초기화에 실패했습니다: ' + (data.error || '알 수 없는 오류'));
+          }
+        })
+        .catch(function (err) {
+          console.warn('[Progress] Reset API error:', err);
+          alert('초기화 중 오류가 발생했습니다.');
+        });
+    });
+  }
 })();
