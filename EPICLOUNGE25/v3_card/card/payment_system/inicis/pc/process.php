@@ -21,8 +21,9 @@ try {
     $P_AMT = $_POST['P_AMT'] ?? '';
     $P_RMESG1 = $_POST['P_RMESG1'] ?? '';
 
-    // 세션에서 link_id 가져오기
+    // 세션에서 link_id와 token 가져오기
     $linkId = $_SESSION['payment_link_id'] ?? 0;
+    $token = $_SESSION['payment_link_token'] ?? '';
 
     if (!$linkId) {
         throw new Exception('결제 정보를 찾을 수 없습니다.');
@@ -32,7 +33,7 @@ try {
     if ($P_STATUS !== '00') {
         error_log("Payment failed: LinkID={$linkId}, Status={$P_STATUS}, Message={$P_RMESG1}");
 
-        header('Location: ' . SITE_URL . '/payment/fail.php?resultCode=' . urlencode($P_STATUS) . '&resultMsg=' . urlencode($P_RMESG1));
+        header('Location: ' . SITE_URL . '/payment/fail.php?token=' . urlencode($token) . '&resultCode=' . urlencode($P_STATUS) . '&resultMsg=' . urlencode($P_RMESG1));
         exit;
     }
 
@@ -59,7 +60,7 @@ try {
     if ($resultCode !== '00') {
         error_log("Payment auth failed: LinkID={$linkId}, ResultCode={$resultCode}, Message={$resultMsg}");
 
-        header('Location: ' . SITE_URL . '/payment/fail.php?resultCode=' . urlencode($resultCode) . '&resultMsg=' . urlencode($resultMsg));
+        header('Location: ' . SITE_URL . '/payment/fail.php?token=' . urlencode($token) . '&resultCode=' . urlencode($resultCode) . '&resultMsg=' . urlencode($resultMsg));
         exit;
     }
 

@@ -416,52 +416,62 @@ class PaymentManager {
      * @return array 통계 데이터
      */
     public function getDashboardStats($adminId = null) {
-        $where = $adminId ? "WHERE admin_id = {$adminId}" : "";
+        // WHERE 조건 및 파라미터 설정
+        $where = "";
+        $params = [];
+
+        if ($adminId !== null) {
+            $where = "WHERE admin_id = ?";
+            $params = [$adminId];
+        }
 
         // 전체 링크 수
         $totalLinks = $this->db->fetch(
-            "SELECT COUNT(*) as count FROM griff_payment_links {$where}"
+            "SELECT COUNT(*) as count FROM griff_payment_links {$where}",
+            $params
         )['count'];
 
         // 활성 링크 수
+        $whereActive = $where ? "{$where} AND link_status = 'active'" : "WHERE link_status = 'active'";
         $activeLinks = $this->db->fetch(
-            "SELECT COUNT(*) as count FROM griff_payment_links {$where} AND link_status = 'active'"
+            "SELECT COUNT(*) as count FROM griff_payment_links {$whereActive}",
+            $params
         )['count'];
 
         // 완료된 결제 수
+        $whereCompleted = $where ? "{$where} AND payment_status = 'completed'" : "WHERE payment_status = 'completed'";
         $completedPayments = $this->db->fetch(
-            "SELECT COUNT(*) as count FROM griff_payment_links {$where} AND payment_status = 'completed'"
+            "SELECT COUNT(*) as count FROM griff_payment_links {$whereCompleted}",
+            $params
         )['count'];
 
         // 총 결제 금액
         $totalAmount = $this->db->fetch(
             "SELECT COALESCE(SUM(payment_amount), 0) as total
-             FROM griff_payment_links {$where} AND payment_status = 'completed'"
+             FROM griff_payment_links {$whereCompleted}",
+            $params
         )['total'];
 
         // 오늘 결제 수
+        $whereToday = $whereCompleted . " AND DATE(payment_completed_at) = CURDATE()";
         $todayPayments = $this->db->fetch(
-            "SELECT COUNT(*) as count
-             FROM griff_payment_links {$where}
-             AND payment_status = 'completed'
-             AND DATE(payment_completed_at) = CURDATE()"
+            "SELECT COUNT(*) as count FROM griff_payment_links {$whereToday}",
+            $params
         )['count'];
 
         // 오늘 결제 금액
         $todayAmount = $this->db->fetch(
             "SELECT COALESCE(SUM(payment_amount), 0) as total
-             FROM griff_payment_links {$where}
-             AND payment_status = 'completed'
-             AND DATE(payment_completed_at) = CURDATE()"
+             FROM griff_payment_links {$whereToday}",
+            $params
         )['total'];
 
         // 이번 달 결제 금액
+        $whereMonth = $whereCompleted . " AND YEAR(payment_completed_at) = YEAR(CURDATE()) AND MONTH(payment_completed_at) = MONTH(CURDATE())";
         $monthAmount = $this->db->fetch(
             "SELECT COALESCE(SUM(payment_amount), 0) as total
-             FROM griff_payment_links {$where}
-             AND payment_status = 'completed'
-             AND YEAR(payment_completed_at) = YEAR(CURDATE())
-             AND MONTH(payment_completed_at) = MONTH(CURDATE())"
+             FROM griff_payment_links {$whereMonth}",
+            $params
         )['total'];
 
         return [
