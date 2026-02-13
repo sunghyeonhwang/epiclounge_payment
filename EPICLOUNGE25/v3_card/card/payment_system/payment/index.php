@@ -176,9 +176,11 @@ if (empty($token)) {
                                 </button>
 
                                 <!-- INICIS PC 결제 폼 -->
-                                <form id="SendPayForm_id" name="SendPayForm" method="post">
+                                <form id="SendPayForm_id" name="SendPayForm" method="post" acceptCharset="utf-8">
                                     <?php foreach ($inicisParams as $key => $value): ?>
+                                        <?php if ($value !== null && $value !== ''): ?>
                                         <input type="hidden" name="<?= $key ?>" value="<?= e($value) ?>">
+                                        <?php endif; ?>
                                     <?php endforeach; ?>
                                 </form>
                             <?php endif; ?>

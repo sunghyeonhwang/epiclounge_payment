@@ -183,9 +183,9 @@ class PaymentManager {
             'oid' => $orderNumber,
             'price' => $link['payment_amount'],
             'goodname' => $link['payment_goodname'],
-            'buyername' => $link['buyer_name'] ?? '결제자',
-            'buyertel' => $link['buyer_phone'] ?? '',
-            'buyeremail' => $link['buyer_email'] ?? '',
+            'buyername' => !empty($link['buyer_name']) ? $link['buyer_name'] : '결제자',
+            'buyertel' => !empty($link['buyer_phone']) ? $link['buyer_phone'] : '01000000000',
+            'buyeremail' => !empty($link['buyer_email']) ? $link['buyer_email'] : 'noreply@griff.co.kr',
             'timestamp' => $timestamp,
             'signature' => $signature,
             'mKey' => $mKey,
@@ -207,9 +207,9 @@ class PaymentManager {
             $result['P_OID'] = $orderNumber;
             $result['P_AMT'] = $link['payment_amount'];
             $result['P_GOODS'] = $link['payment_goodname'];
-            $result['P_UNAME'] = $link['buyer_name'] ?? '결제자';
-            $result['P_MOBILE'] = $link['buyer_phone'] ?? '';
-            $result['P_EMAIL'] = $link['buyer_email'] ?? '';
+            $result['P_UNAME'] = !empty($link['buyer_name']) ? $link['buyer_name'] : '결제자';
+            $result['P_MOBILE'] = !empty($link['buyer_phone']) ? $link['buyer_phone'] : '01000000000';
+            $result['P_EMAIL'] = !empty($link['buyer_email']) ? $link['buyer_email'] : 'noreply@griff.co.kr';
             $result['P_NEXT_URL'] = SITE_URL . '/inicis/mobile/process.php';
             $result['P_NOTI_URL'] = SITE_URL . '/inicis/mobile/vbank_noti.php';
             $result['P_CHARSET'] = 'utf8';
